@@ -1,0 +1,12 @@
+Generation tool: built-in image_gen
+Output: ech-canary-icon.png
+Actual output dimensions: 1254 x 1254 pixels (RGB PNG)
+
+Use case: logo-brand
+Asset type: production master application icon for ECH Canary, a Flutter HTTPS connectivity and Encrypted Client Hello diagnostic app.
+Primary request: create one polished, modern, flat application icon, square 1024 by 1024.
+Scene/backdrop: a completely uniform opaque olive-green background, matching the application's existing brand seed color #566A32, extending to all four edges.
+Subject: a single distinctive geometric canary silhouette in warm pale yellow #FFE69A. Make it recognizably a small canary, with a rounded compact body, simple head, tiny beak, one clean dark olive eye, and a short geometric tail. Integrate two generous curved negative-space cuts into its wing, subtly suggesting an echo or network signal as part of the bird itself.
+Style/medium: refined flat vector-like logo rendered as a high-quality PNG; confident smooth geometry, crisp edges, minimal number of shapes, consistent rounded geometry, high contrast, restrained and friendly, professional utility app identity.
+Composition/framing: a single optically centered symbol occupying about 64 percent of the square, generous even breathing room and adaptive-icon-safe margins. Prioritize a strong clear silhouette at 32 pixels. The square image itself is the finished icon, not a presentation or mockup.
+Constraints: exactly two flat colors including the background, with the eye and wing cutouts using the background olive. No text, initials, lettering, border, watermark, surrounding objects, feet, cage, lock, shield, globe, standalone Wi-Fi symbol, gradients, texture, shadows, highlights, 3D effects, perspective, rounded outer corners, or multiple variants. Do not imitate any existing social media bird logo.

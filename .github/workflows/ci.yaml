@@ -1,0 +1,214 @@
+name: CI
+
+on:
+  push:
+    branches: ['**']
+  pull_request:
+  workflow_dispatch:
+  workflow_call:
+    inputs:
+      sign-android:
+        description: Require the permanent Android release signing key
+        type: boolean
+        default: false
+    secrets:
+      ANDROID_KEYSTORE_BASE64:
+        required: false
+      ANDROID_KEYSTORE_PASSWORD:
+        required: false
+      ANDROID_KEY_ALIAS:
+        required: false
+      ANDROID_KEY_PASSWORD:
+        required: false
+
+permissions:
+  contents: read
+
+# Use a distinct group from release.yaml, including when called by Release.
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+env:
+  FLUTTER_VERSION: '3.47.5'
+
+jobs:
+  checks:
+    name: Flutter lint and Dart tests
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v6
+
+      # ech_http's build hook also compiles native code during tests.
+      - name: Install native build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y clang cmake ninja-build pkg-config libgtk-3-dev liblzma-dev
+
+      - uses: subosito/flutter-action@v2
+        with:
+          flutter-version: ${{ env.FLUTTER_VERSION }}
+          channel: stable
+          cache: true
+
+      - name: Resolve locked dependencies
+        run: flutter pub get --enforce-lockfile
+
+      - name: Flutter lint
+        run: flutter analyze --no-pub
+
+      - name: Dart tests
+        run: flutter test --no-pub
+
+  build:
+    name: Release build (${{ matrix.platform }})
+    needs: checks
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: android
+            runner: ubuntu-24.04
+            command: flutter build apk --release --no-pub --split-per-abi --target-platform android-arm,android-arm64,android-x64
+          - platform: windows
+            # MSVC 14.51+ supports ech_http's embedded CA bundle.
+            runner: windows-2025-vs2026
+            command: flutter build windows --release --no-pub
+          - platform: linux
+            runner: ubuntu-24.04
+            command: flutter build linux --release --no-pub
+          - platform: macos
+            runner: macos-15
+            command: flutter build macos --release --no-pub
+          - platform: ios
+            runner: macos-15
+            command: flutter build ios --release --no-pub --no-codesign
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Install Linux native build dependencies
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y clang cmake ninja-build pkg-config libgtk-3-dev liblzma-dev
+
+      - name: Install Apple native build dependencies
+        if: runner.os == 'macOS'
+        run: |
+          for tool in cmake ninja; do
+            if ! command -v "$tool" >/dev/null 2>&1; then
+              brew install "$tool"
+            fi
+          done
+
+      - name: Set up Java
+        if: matrix.platform == 'android'
+        uses: actions/setup-java@v6
+        with:
+          distribution: temurin
+          java-version: '17'
+          cache: gradle
+          cache-dependency-path: |
+            android/**/*.gradle.kts
+            android/gradle/wrapper/gradle-wrapper.properties
+
+      - uses: subosito/flutter-action@v2
+        with:
+          flutter-version: ${{ env.FLUTTER_VERSION }}
+          channel: stable
+          cache: true
+
+      - name: Resolve locked dependencies
+        run: flutter pub get --enforce-lockfile
+
+      - name: Restore Android release keystore
+        if: matrix.platform == 'android' && inputs.sign-android
+        shell: bash
+        env:
+          ANDROID_KEYSTORE_BASE64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
+        run: |
+          if [[ -z "$ANDROID_KEYSTORE_BASE64" ]]; then
+            echo '::error::Missing required release secret: ANDROID_KEYSTORE_BASE64'
+            exit 1
+          fi
+          umask 077
+          printf '%s' "$ANDROID_KEYSTORE_BASE64" | base64 --decode > "$RUNNER_TEMP/ech-canary-release.jks"
+
+      - name: Build release
+        env:
+          ANDROID_REQUIRE_RELEASE_SIGNING: ${{ matrix.platform == 'android' && inputs.sign-android }}
+          ANDROID_KEYSTORE_PATH: ${{ matrix.platform == 'android' && inputs.sign-android && format('{0}/ech-canary-release.jks', runner.temp) || '' }}
+          ANDROID_KEYSTORE_PASSWORD: ${{ matrix.platform == 'android' && inputs.sign-android && secrets.ANDROID_KEYSTORE_PASSWORD || '' }}
+          ANDROID_KEY_ALIAS: ${{ matrix.platform == 'android' && inputs.sign-android && secrets.ANDROID_KEY_ALIAS || '' }}
+          ANDROID_KEY_PASSWORD: ${{ matrix.platform == 'android' && inputs.sign-android && secrets.ANDROID_KEY_PASSWORD || '' }}
+        run: ${{ matrix.command }}
+
+      - name: Verify Android release signatures
+        if: matrix.platform == 'android' && inputs.sign-android
+        shell: bash
+        run: |
+          apksigner="$(find "${ANDROID_HOME:?}/build-tools" -type f -name apksigner | sort -V | tail -n 1)"
+          test -n "$apksigner" || { echo '::error::Android apksigner was not found.'; exit 1; }
+          expected_sha="$(tr -d '[:space:]:' < android/release-certificate.sha256)"
+          for apk in build/app/outputs/flutter-apk/app-*-release.apk; do
+            verification="$("$apksigner" verify --verbose --print-certs "$apk")"
+            # Build Tools 37 labels certificates by signature scheme.
+            actual_sha="$(printf '%s\n' "$verification" | tr -d '\r' | awk '/^(Signer #|Signer \(|V[0-9.]+ Signer)/ && / certificate SHA-256 digest: / { print tolower($NF) }' | sort -u)"
+            if [[ "$actual_sha" != "$expected_sha" ]]; then
+              printf '%s\n' "$verification"
+              echo "::error::Unexpected Android signing certificate: $apk"
+              exit 1
+            fi
+            echo "Verified release signature: $apk ($actual_sha)"
+          done
+
+      - name: Package Android APKs
+        if: matrix.platform == 'android'
+        run: |
+          mkdir -p artifacts
+          for abi in armeabi-v7a arm64-v8a x86_64; do
+            cp "build/app/outputs/flutter-apk/app-$abi-release.apk" "artifacts/ech_canary-android-$abi.apk"
+          done
+
+      - name: Package Windows bundle
+        if: matrix.platform == 'windows'
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force artifacts | Out-Null
+          Compress-Archive -Path build/windows/x64/runner/Release/* -DestinationPath artifacts/ech_canary-windows-x64.zip
+
+      - name: Package Linux bundle
+        if: matrix.platform == 'linux'
+        run: |
+          mkdir -p artifacts
+          tar -czf artifacts/ech_canary-linux-x64.tar.gz -C build/linux/x64/release/bundle .
+
+      - name: Package macOS app
+        if: matrix.platform == 'macos'
+        run: |
+          mkdir -p artifacts
+          ditto -c -k --sequesterRsrc --keepParent build/macos/Build/Products/Release/ech_canary.app artifacts/ech_canary-macos.zip
+
+      - name: Package unsigned iOS app
+        if: matrix.platform == 'ios'
+        run: |
+          mkdir -p artifacts build/ios/unsigned/Payload
+          ditto build/ios/iphoneos/Runner.app build/ios/unsigned/Payload/Runner.app
+          ditto -c -k --keepParent build/ios/unsigned/Payload artifacts/ech_canary-ios-unsigned.ipa
+
+      - name: Upload release artifacts
+        uses: actions/upload-artifact@v7
+        with:
+          name: release-${{ matrix.platform }}
+          path: artifacts/*
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 14
+
+      - name: Remove Android release keystore
+        if: always() && matrix.platform == 'android' && inputs.sign-android
+        shell: bash
+        run: rm -f -- "$RUNNER_TEMP/ech-canary-release.jks"

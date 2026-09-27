@@ -1,0 +1,84 @@
+name: Release
+
+on:
+  push:
+    tags: ['**']
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  verify-tag:
+    name: Verify tag belongs to main
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+
+      # Tag pushes cannot be filtered by branch; allow any commit already on main.
+      - name: Require a commit reachable from main
+        run: |
+          git fetch --no-tags origin +refs/heads/main:refs/remotes/origin/main
+          if ! git merge-base --is-ancestor HEAD refs/remotes/origin/main; then
+            echo '::error::Release tags must point to a commit on main.'
+            exit 1
+          fi
+
+  build:
+    name: Check and build all platforms
+    needs: verify-tag
+    uses: ./.github/workflows/ci.yaml
+    with:
+      sign-android: true
+    secrets:
+      ANDROID_KEYSTORE_BASE64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
+      ANDROID_KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
+      ANDROID_KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
+      ANDROID_KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
+
+  publish:
+    name: Publish GitHub Release
+    needs: build
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      contents: write
+    steps:
+      - name: Download all platform artifacts
+        uses: actions/download-artifact@v8
+        with:
+          pattern: release-*
+          merge-multiple: true
+          path: artifacts
+
+      - name: Verify release assets and generate checksums
+        working-directory: artifacts
+        run: |
+          for asset in \
+            ech_canary-android-armeabi-v7a.apk \
+            ech_canary-android-arm64-v8a.apk \
+            ech_canary-android-x86_64.apk \
+            ech_canary-windows-x64.zip \
+            ech_canary-linux-x64.tar.gz \
+            ech_canary-macos.zip \
+            ech_canary-ios-unsigned.ipa; do
+            test -s "$asset" || { echo "::error::Missing release asset: $asset"; exit 1; }
+          done
+          sha256sum ech_canary-* > SHA256SUMS.txt
+
+      - name: Create release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          RELEASE_TAG: ${{ github.ref_name }}
+        run: |
+          gh release create "$RELEASE_TAG" artifacts/* \
+            --verify-tag \
+            --title "$RELEASE_TAG" \
+            --generate-notes
